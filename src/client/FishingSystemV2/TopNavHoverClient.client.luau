@@ -1,21 +1,34 @@
 -- Hover-only top-nav polish. This script never changes navigation bindings or authored UI layout.
+-- It only animates the Rotation of FishingFrame, PlotFrame and ShopFrame.
+--
+-- Hover is detected from mouse-movement InputObject positions (GUI space, top-bar inset already
+-- removed), which is the same space PlayerGui:GetGuiObjectsAtPosition expects. Touch taps are
+-- detected from the input type itself, so it also works in Studio's device emulator.
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
 local Config = {
-	SwayAngle = 6,
-	SwayHalfPeriod = 0.35,
-	ReturnSeconds = 0.15,
-	SafetyPollSeconds = 0.2,
-	TouchWiggleSeconds = 0.3,
+	SwayAngle = 6, -- degrees either side of rest
+	SwayHalfPeriod = 0.35, -- seconds from one side to the other
+	ReturnSeconds = 0.15, -- ease back to rest when hover ends
+	TouchWiggleSeconds = 0.3, -- one wiggle on tap
 }
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+
+local FRAME_SPECS = {
+	{ name = "FishingFrame", button = { "TextButton" } },
+	{ name = "PlotFrame", button = { "TextButton" } },
+	{ name = "ShopFrame", button = { "Glossy face", "TextButton" } },
+}
+
 local warnedPaths = {}
-local bindings = {}
+local bindings = {} -- array of binding tables
 local boundTopFrames = nil
+local lastMousePosition = nil -- Vector2 in GUI space, or nil when unknown
 
 local function warnMissing(path)
 	if warnedPaths[path] then return end
@@ -35,203 +48,193 @@ local function waitForChild(parent, name, path)
 	return child
 end
 
-local function isTouchOnly()
-	return UserInputService.TouchEnabled and not UserInputService.MouseEnabled
-end
-
-local function cancelTween(tween)
-	if tween then
-		tween:Cancel()
+local function cancelTween(binding)
+	if binding.tween then
+		binding.tween:Cancel()
+		binding.tween = nil
 	end
 end
 
-local function cancelAnimations(binding)
-	binding.token += 1
-	cancelTween(binding.swayTween)
-	cancelTween(binding.returnTween)
-	cancelTween(binding.wiggleTween)
-	binding.swayTween = nil
-	binding.returnTween = nil
-	binding.wiggleTween = nil
+-- Sway is driven every frame from a sine wave, so it can start smoothly from wherever the
+-- frame currently is and never needs chained tweens.
+local function startSway(binding)
+	if binding.swaying then return end
+	cancelTween(binding)
+	binding.swaying = true
+	-- Start the wave at the phase that matches the current rotation (no jump).
+	local offset = math.clamp((binding.frame.Rotation - binding.restRotation) / Config.SwayAngle, -1, 1)
+	local period = Config.SwayHalfPeriod * 2
+	binding.swayClock = math.asin(offset) / (2 * math.pi) * period
 end
 
-local function returnToRest(binding)
-	cancelTween(binding.swayTween)
-	cancelTween(binding.wiggleTween)
-	binding.swayTween = nil
-	binding.wiggleTween = nil
-	cancelTween(binding.returnTween)
-	binding.token += 1
+local function stopSway(binding)
+	if not binding.swaying then return end
+	binding.swaying = false
+	cancelTween(binding)
 	local tween = TweenService:Create(
 		binding.frame,
 		TweenInfo.new(Config.ReturnSeconds, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		{Rotation = binding.restRotation}
+		{ Rotation = binding.restRotation }
 	)
-	binding.returnTween = tween
+	binding.tween = tween
 	tween:Play()
 end
 
-local function mouseIsOver(frame)
-	local mousePosition = UserInputService:GetMouseLocation()
-	for _, guiObject in ipairs(playerGui:GetGuiObjectsAtPosition(mousePosition.X, mousePosition.Y)) do
-		if guiObject == frame or guiObject:IsDescendantOf(frame) then
+local function playTouchWiggle(binding)
+	binding.swaying = false
+	cancelTween(binding)
+	local step = Config.TouchWiggleSeconds / 3
+	local targets = {
+		binding.restRotation + Config.SwayAngle,
+		binding.restRotation - Config.SwayAngle,
+		binding.restRotation,
+	}
+	local myToken = {}
+	binding.wiggleToken = myToken
+	local function play(index)
+		if binding.wiggleToken ~= myToken or index > #targets then return end
+		local tween = TweenService:Create(
+			binding.frame,
+			TweenInfo.new(step, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+			{ Rotation = targets[index] }
+		)
+		binding.tween = tween
+		tween.Completed:Connect(function(state)
+			if state == Enum.PlaybackState.Completed then
+				play(index + 1)
+			end
+		end)
+		tween:Play()
+	end
+	play(1)
+end
+
+local function isHovered(binding, objectsAtMouse)
+	for _, guiObject in ipairs(objectsAtMouse) do
+		if guiObject == binding.frame or guiObject:IsDescendantOf(binding.frame) then
 			return true
 		end
 	end
 	return false
 end
 
-local function startSway(binding)
-	if isTouchOnly() then return end
-	cancelAnimations(binding)
-	binding.frame.Rotation = binding.restRotation - Config.SwayAngle
-	local tween = TweenService:Create(
-		binding.frame,
-		TweenInfo.new(Config.SwayHalfPeriod, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
-		{Rotation = binding.restRotation + Config.SwayAngle}
-	)
-	binding.swayTween = tween
-	local token = binding.token
-	tween:Play()
-
-	task.spawn(function()
-		while binding.swayTween == tween and binding.token == token do
-			task.wait(Config.SafetyPollSeconds)
-			if binding.swayTween ~= tween or binding.token ~= token then return end
-			if not mouseIsOver(binding.frame) then
-				returnToRest(binding)
-				return
-			end
+local function refreshHover()
+	if #bindings == 0 then return end
+	if not lastMousePosition then
+		for _, binding in ipairs(bindings) do
+			stopSway(binding)
 		end
-	end)
-end
-
-local function stopSwayIfOutside(binding)
-	if isTouchOnly() then return end
-	task.defer(function()
-		if binding.swayTween and not mouseIsOver(binding.frame) then
-			returnToRest(binding)
-		end
-	end)
-end
-
-local function playTouchWiggle(binding)
-	if not isTouchOnly() then return end
-	cancelAnimations(binding)
-	local token = binding.token
-	local sideSeconds = Config.TouchWiggleSeconds / 3
-
-	local function playStep(targetRotation, nextStep)
-		if binding.token ~= token then return end
-		local tween = TweenService:Create(
-			binding.frame,
-			TweenInfo.new(sideSeconds, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
-			{Rotation = targetRotation}
-		)
-		binding.wiggleTween = tween
-		tween.Completed:Connect(function(playbackState)
-			if playbackState == Enum.PlaybackState.Completed and binding.token == token and nextStep then
-				nextStep()
-			end
-		end)
-		tween:Play()
+		return
 	end
-
-	playStep(binding.restRotation + Config.SwayAngle, function()
-		playStep(binding.restRotation - Config.SwayAngle, function()
-			playStep(binding.restRotation)
-		end)
-	end)
-end
-
-local function disconnectBinding(binding)
-	for _, connection in ipairs(binding.connections) do
-		connection:Disconnect()
-	end
-	cancelAnimations(binding)
-	binding.frame.Rotation = binding.restRotation
-end
-
-local function connectHoverTarget(binding, target)
-	table.insert(binding.connections, target.MouseEnter:Connect(function()
-		startSway(binding)
-	end))
-	table.insert(binding.connections, target.MouseLeave:Connect(function()
-		stopSwayIfOutside(binding)
-	end))
-end
-
-local function findButton(frame, buttonPath, framePath)
-	local parent = frame
-	for _, name in ipairs(buttonPath) do
-		parent = waitForChild(parent, name, framePath .. "." .. name)
-		if not parent then return nil end
-	end
-	return parent:IsA("GuiButton") and parent or nil
-end
-
-local function bindFrame(overall, frameName, buttonPath)
-	local framePath = "PlayerGui.TopFrames.OverallTopFrame." .. frameName
-	local frame = waitForChild(overall, frameName, framePath)
-	if not frame or not frame:IsA("GuiObject") then return end
-	local button = findButton(frame, buttonPath, framePath)
-	if not button then return end
-
-	local binding = {
-		frame = frame,
-		restRotation = frame.Rotation,
-		connections = {},
-		token = 0,
-		swayTween = nil,
-		returnTween = nil,
-		wiggleTween = nil,
-	}
-	table.insert(bindings, binding)
-
-	connectHoverTarget(binding, frame)
-	for _, descendant in ipairs(frame:GetDescendants()) do
-		if descendant:IsA("GuiObject") then
-			connectHoverTarget(binding, descendant)
+	local objectsAtMouse = playerGui:GetGuiObjectsAtPosition(lastMousePosition.X, lastMousePosition.Y)
+	for _, binding in ipairs(bindings) do
+		if isHovered(binding, objectsAtMouse) then
+			startSway(binding)
+		else
+			stopSway(binding)
 		end
 	end
-	table.insert(binding.connections, button.Activated:Connect(function()
-		playTouchWiggle(binding)
-	end))
 end
 
 local function disconnectAll()
 	for _, binding in ipairs(bindings) do
-		disconnectBinding(binding)
+		for _, connection in ipairs(binding.connections) do
+			connection:Disconnect()
+		end
+		binding.swaying = false
+		binding.wiggleToken = nil
+		cancelTween(binding)
+		binding.frame.Rotation = binding.restRotation
 	end
 	table.clear(bindings)
 	boundTopFrames = nil
 end
 
-local function bindTopFrames(preferredTopFrames)
-	local topFrames = preferredTopFrames or playerGui:FindFirstChild("TopFrames")
-	if topFrames == boundTopFrames then return end
-
-	disconnectAll()
-	if not topFrames then
-		warnMissing("PlayerGui.TopFrames")
-		return
+local function findButton(frame, path, framePath)
+	local node = frame
+	for _, name in ipairs(path) do
+		node = waitForChild(node, name, framePath .. "." .. name)
+		if not node then return nil end
 	end
+	return node:IsA("GuiButton") and node or nil
+end
+
+local function bindFrame(overall, spec)
+	local framePath = "PlayerGui.TopFrames.OverallTopFrame." .. spec.name
+	local frame = waitForChild(overall, spec.name, framePath)
+	if not frame or not frame:IsA("GuiObject") then return end
+	local button = findButton(frame, spec.button, framePath)
+
+	local binding = {
+		frame = frame,
+		restRotation = frame.Rotation,
+		connections = {},
+		swaying = false,
+		swayClock = 0,
+		tween = nil,
+		wiggleToken = nil,
+	}
+	table.insert(bindings, binding)
+
+	if button then
+		-- One wiggle per tap. Uses the input type, not device capability flags.
+		table.insert(binding.connections, button.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.Touch then
+				playTouchWiggle(binding)
+			end
+		end))
+	end
+end
+
+local function bindTopFrames(topFrames)
+	topFrames = topFrames or playerGui:FindFirstChild("TopFrames")
+	if topFrames == boundTopFrames then return end
+	disconnectAll()
+	if not topFrames then return end -- ChildAdded below binds it when it arrives
 	boundTopFrames = topFrames
 
 	local overall = waitForChild(topFrames, "OverallTopFrame", "PlayerGui.TopFrames.OverallTopFrame")
-	if not overall then return end
-
-	bindFrame(overall, "FishingFrame", {"TextButton"})
-	bindFrame(overall, "PlotFrame", {"TextButton"})
-	bindFrame(overall, "ShopFrame", {"Glossy face", "TextButton"})
+	if not overall or boundTopFrames ~= topFrames then return end
+	for _, spec in ipairs(FRAME_SPECS) do
+		bindFrame(overall, spec)
+	end
+	refreshHover()
 end
 
-playerGui.ChildAdded:Connect(function(child)
-	if child.Name == "TopFrames" then
-		task.defer(function()
-			bindTopFrames(child)
-		end)
+-- Track the mouse in GUI space. InputObject.Position for mouse movement already excludes the
+-- top-bar inset, matching GetGuiObjectsAtPosition.
+UserInputService.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement then
+		lastMousePosition = Vector2.new(input.Position.X, input.Position.Y)
+		refreshHover()
+	elseif input.UserInputType == Enum.UserInputType.Touch then
+		-- Touch never hovers.
+		lastMousePosition = nil
+		refreshHover()
 	end
 end)
 
-bindTopFrames(playerGui:FindFirstChild("TopFrames"))
+UserInputService.WindowFocusReleased:Connect(function()
+	lastMousePosition = nil
+	refreshHover()
+end)
+
+-- Advance every swaying frame once per rendered frame.
+RunService.RenderStepped:Connect(function(deltaTime)
+	local period = Config.SwayHalfPeriod * 2
+	for _, binding in ipairs(bindings) do
+		if binding.swaying then
+			binding.swayClock += deltaTime
+			local phase = (binding.swayClock / period) * 2 * math.pi
+			binding.frame.Rotation = binding.restRotation + Config.SwayAngle * math.sin(phase)
+		end
+	end
+end)
+
+playerGui.ChildAdded:Connect(function(child)
+	if child.Name == "TopFrames" then
+		task.defer(bindTopFrames, child)
+	end
+end)
+
+task.spawn(bindTopFrames, playerGui:FindFirstChild("TopFrames"))
