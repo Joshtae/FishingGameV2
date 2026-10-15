@@ -1,0 +1,75 @@
+-- Shared Phase 3 fishing tuning. Server remains authoritative over every result.
+local Config = {}
+
+Config.Rods = { Steel = {Luck = 1, Reel = 1, Strength = 4} }
+Config.BaseHits = {3,4,5,6,7,8,9,10,11,12,13}
+Config.TickSpeedDegrees = {140,156,176,196,216,240,264,292,320,350,380}
+Config.ZoneCount = {3,3,3,2,2,2,2,2,1,1,1}
+Config.ZoneWidthDegrees = {48,45,42,39,36,33,30,27,30,26,23}
+Config.HitToleranceDegrees = 5
+Config.MaxMisses = 10
+Config.MaxConsecutiveMisses = 5
+Config.PressCooldownSeconds = 0.15
+Config.ZoneArmSeconds = 0.30
+Config.StartArmSeconds = 1.30
+Config.MinLeadSeconds = 0.5
+Config.MinZoneGapDegrees = 12
+Config.TimestampTrustWindow = 0.08
+Config.MaxLatencyCompensation = 0.30
+Config.IdleCancelSeconds = 12
+Config.SessionMaxSeconds = 180
+Config.BiteWaitMinSeconds = 2.0
+Config.BiteWaitMaxSeconds = 4.0
+Config.BiteWaitFloorSeconds = 0.5
+Config.SuccessCooldown = 0.5
+Config.FailCooldown = 2.0
+Config.CancelCooldown = 1.5
+Config.ShiftZonesOnMiss = false
+Config.MaxCastDistance = 60
+Config.MaxWalkAwayDistance = 25
+Config.ZoneVerticalPadding = 3
+Config.RequireNearSpot = false
+Config.SpotRadius = 40
+Config.BackpackCapacity = 50
+Config.HotbarSlots = 9
+Config.HeldModelSize = 2
+Config.HeldGripOffsetX = 0
+Config.HeldGripOffsetY = 0.35
+Config.HeldGripOffsetZ = -0.25
+Config.HeldGripRotationX = -90
+Config.HeldGripRotationY = 180
+Config.HeldGripRotationZ = 0
+Config.TouchCastScanInterval = 0.2
+Config.TouchCastAnglesDeg = {0, -20, 20, -40, 40}
+Config.TouchCastDistances = {8, 12, 16, 20, 26}
+Config.RemoteRateLimit = 10
+Config.AutoFishRecastDelay = 1.0
+Config.AutoFishHitChance = 1.0
+Config.AutoFishMaxConsecutiveFails = 0
+Config.ResumeDelaySeconds = 3
+Config.FasterReelMultiplier = 1.5
+Config.CastRatePerSecond = 3
+Config.InputRatePerSecond = 8
+Config.MaxWindupWaitSeconds = 0.85
+Config.CastResultTimeoutSeconds = 3.0
+Config.ThrowReleaseFraction = 0.5
+Config.CastThrowSeconds = 0.55
+Config.HoldFinalPose = true
+Config.CastWindupAnimationId = "rbxassetid://115989671663934"
+Config.CastThrowAnimationId = "rbxassetid://79830218895934"
+Config.CatchAnimationId = "rbxassetid://138800253019294"
+Config.CancelAnimationId = Config.CatchAnimationId
+Config.ReelIdleAnimationId = ""
+Config.RodAttachHand = "RightHand"
+Config.RodGripOffset = CFrame.new()
+Config.TimingCircleScale = 0.38
+Config.ZoneSegmentDegrees = 2.5
+Config.RodLength = 5
+Config.BobberIdleBobAmplitude = 0.15
+Config.BobberIdleBobPeriod = 1.6
+Config.BobberDipDepth = 0.8
+Config.BobberDipDownSeconds = 0.10
+Config.BobberDipUpSeconds = 0.20
+
+-- Hit windows (Common through Secret): 0.414, 0.353, 0.295, 0.250, 0.213, 0.179, 0.152, 0.127, 0.125, 0.103, 0.087 seconds: (ZoneWidthDegrees[i] + 2 * HitToleranceDegrees) / TickSpeedDegrees[i].
+return Config
