@@ -1,15 +1,15 @@
--- TopNavHoverClient v3: hover sway for the top nav (FishingFrame, PlotFrame, ShopFrame).
+-- TopNavHoverClient v4: hover sway for the top nav (FishingFrame, PlotFrame, ShopFrame).
 -- Only animates each frame's Rotation; never changes navigation bindings or authored layout.
 --
--- Hover comes from MouseEnter/MouseLeave on each frame and its button (no screen-coordinate
--- math). A fallback stops a sway if a MouseLeave is missed. Touch taps play one wiggle.
-local GuiService = game:GetService("GuiService")
+-- Hover is read every frame from the button's own GuiState (Hover/Press), which is the same
+-- engine state that shows the hand cursor. No MouseEnter events, no screen coordinates.
+-- Touch taps play one wiggle.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
-local VERSION = "v3"
+local VERSION = "v4"
 
 local Config = {
 	SwayAngle = 6, -- degrees either side of rest
@@ -31,6 +31,16 @@ local warnedPaths = {}
 local bindings = {}
 local boundTopFrames = nil
 
+-- DEV_ONLY_BEGIN TopNavHoverDebug
+-- Temporary Studio-only readout to diagnose the hover sway. Remove once R7 passes.
+local DEBUG = RunService:IsStudio()
+local function debugLog(message)
+	if DEBUG then
+		print("[FishingSystemV2.TopNavHover][debug] " .. message)
+	end
+end
+-- DEV_ONLY_END TopNavHoverDebug
+
 local function warnMissing(path)
 	if warnedPaths[path] then return end
 	warnedPaths[path] = true
@@ -49,10 +59,6 @@ local function waitForChild(parent, name, path)
 	return child
 end
 
-local function lastInputWasTouch()
-	return UserInputService:GetLastInputType() == Enum.UserInputType.Touch
-end
-
 local function cancelTween(binding)
 	if binding.tween then
 		binding.tween:Cancel()
@@ -68,6 +74,15 @@ local function startSway(binding)
 	-- Begin the sine wave at the phase matching the current rotation, so there is no jump.
 	local offset = math.clamp((binding.frame.Rotation - binding.restRotation) / Config.SwayAngle, -1, 1)
 	binding.swayClock = math.asin(offset) / (2 * math.pi) * (Config.SwayHalfPeriod * 2)
+	-- DEV_ONLY_BEGIN TopNavHoverDebug
+	debugLog(binding.frame.Name .. " hover start")
+	local frame = binding.frame
+	task.delay(0.5, function()
+		if binding.swaying then
+			debugLog(string.format("%s Rotation after 0.5 s = %.2f (rest %.2f)", frame.Name, frame.Rotation, binding.restRotation))
+		end
+	end)
+	-- DEV_ONLY_END TopNavHoverDebug
 end
 
 local function stopSway(binding)
@@ -81,23 +96,12 @@ local function stopSway(binding)
 	)
 	binding.tween = tween
 	tween:Play()
-end
-
-local function clearHover(binding)
-	table.clear(binding.inside)
-	stopSway(binding)
-end
-
-local function evaluate(binding)
-	if next(binding.inside) ~= nil then
-		startSway(binding)
-	else
-		stopSway(binding)
-	end
+	-- DEV_ONLY_BEGIN TopNavHoverDebug
+	debugLog(binding.frame.Name .. " hover end")
+	-- DEV_ONLY_END TopNavHoverDebug
 end
 
 local function playTouchWiggle(binding)
-	table.clear(binding.inside)
 	binding.swaying = false
 	cancelTween(binding)
 	local step = Config.TouchWiggleSeconds / 3
@@ -126,36 +130,12 @@ local function playTouchWiggle(binding)
 	play(1)
 end
 
--- Padding (pixels) around a frame's unrotated bounds, so the rotated corners still count.
-local FALLBACK_PADDING = 16
-
--- True if the point is on or near the frame. Uses plain bounds (AbsolutePosition and
--- AbsoluteSize ignore Rotation) and tries the point with and without the top-bar inset, so a
--- coordinate-space mismatch can only keep a sway running a little longer, never cancel it.
-local function frameUnderPoint(binding, x, y)
-	local inset = GuiService:GetGuiInset()
-	local position = binding.frame.AbsolutePosition
-	local size = binding.frame.AbsoluteSize
-	local minX, minY = position.X - FALLBACK_PADDING, position.Y - FALLBACK_PADDING
-	local maxX, maxY = position.X + size.X + FALLBACK_PADDING, position.Y + size.Y + FALLBACK_PADDING
-	for _, point in ipairs({ Vector2.new(x, y), Vector2.new(x - inset.X, y - inset.Y), Vector2.new(x + inset.X, y + inset.Y) }) do
-		if point.X >= minX and point.X <= maxX and point.Y >= minY and point.Y <= maxY then
-			return true
-		end
+local function isHovered(binding)
+	if UserInputService:GetLastInputType() == Enum.UserInputType.Touch then
+		return false -- touch never hovers; taps play the wiggle
 	end
-	return false
-end
-
-local function watchHover(binding, target, key)
-	table.insert(binding.connections, target.MouseEnter:Connect(function()
-		if lastInputWasTouch() then return end -- taps also fire MouseEnter; touch never hovers
-		binding.inside[key] = true
-		evaluate(binding)
-	end))
-	table.insert(binding.connections, target.MouseLeave:Connect(function()
-		binding.inside[key] = nil
-		task.defer(evaluate, binding)
-	end))
+	local state = binding.button.GuiState
+	return state == Enum.GuiState.Hover or state == Enum.GuiState.Press
 end
 
 local function disconnectAll()
@@ -178,7 +158,11 @@ local function findButton(frame, path, framePath)
 		node = waitForChild(node, name, framePath .. "." .. name)
 		if not node then return nil end
 	end
-	return node:IsA("GuiButton") and node or nil
+	if not node:IsA("GuiButton") then
+		warnMissing(framePath .. " (button is not a GuiButton)")
+		return nil
+	end
+	return node
 end
 
 local function bindFrame(overall, spec)
@@ -186,12 +170,13 @@ local function bindFrame(overall, spec)
 	local frame = waitForChild(overall, spec.name, framePath)
 	if not frame or not frame:IsA("GuiObject") then return false end
 	local button = findButton(frame, spec.button, framePath)
+	if not button then return false end
 
 	local binding = {
 		frame = frame,
+		button = button,
 		restRotation = frame.Rotation,
 		connections = {},
-		inside = {},
 		swaying = false,
 		swayClock = 0,
 		tween = nil,
@@ -199,15 +184,11 @@ local function bindFrame(overall, spec)
 	}
 	table.insert(bindings, binding)
 
-	watchHover(binding, frame, "frame")
-	if button then
-		watchHover(binding, button, "button")
-		table.insert(binding.connections, button.InputBegan:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.Touch then
-				playTouchWiggle(binding)
-			end
-		end))
-	end
+	table.insert(binding.connections, button.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch then
+			playTouchWiggle(binding)
+		end
+	end))
 	return true
 end
 
@@ -226,40 +207,37 @@ local function bindTopFrames(topFrames)
 			count += 1
 		end
 	end
-	-- One line so it is easy to confirm in Output which version is running.
 	print(string.format("[FishingSystemV2.TopNavHover] %s bound %d/3 top nav frames", VERSION, count))
 end
 
--- Fallback: if a MouseLeave was missed, stop the sway once the mouse is clearly elsewhere.
-UserInputService.InputChanged:Connect(function(input)
-	if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-	for _, binding in ipairs(bindings) do
-		if binding.swaying and not frameUnderPoint(binding, input.Position.X, input.Position.Y) then
-			clearHover(binding)
-		end
-	end
-end)
-
-UserInputService.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.Touch then
-		for _, binding in ipairs(bindings) do
-			if binding.swaying then
-				clearHover(binding)
-			end
-		end
-	end
-end)
-
 UserInputService.WindowFocusReleased:Connect(function()
 	for _, binding in ipairs(bindings) do
-		clearHover(binding)
+		stopSway(binding)
 	end
 end)
 
--- Advance every swaying frame once per rendered frame.
+-- DEV_ONLY_BEGIN TopNavHoverDebug
+local lastLoggedState = {}
+-- DEV_ONLY_END TopNavHoverDebug
+
+-- Every rendered frame: read hover state, then advance the sway.
 RunService.RenderStepped:Connect(function(deltaTime)
 	local period = Config.SwayHalfPeriod * 2
 	for _, binding in ipairs(bindings) do
+		-- DEV_ONLY_BEGIN TopNavHoverDebug
+		local guiState = binding.button.GuiState
+		if lastLoggedState[binding] ~= guiState then
+			lastLoggedState[binding] = guiState
+			debugLog(binding.frame.Name .. " button GuiState = " .. guiState.Name)
+		end
+		-- DEV_ONLY_END TopNavHoverDebug
+
+		if isHovered(binding) then
+			startSway(binding)
+		else
+			stopSway(binding)
+		end
+
 		if binding.swaying then
 			binding.swayClock += deltaTime
 			binding.frame.Rotation = binding.restRotation
