@@ -1,13 +1,15 @@
--- Hover-only top-nav polish. This script never changes navigation bindings or authored UI layout.
--- It only animates the Rotation of FishingFrame, PlotFrame and ShopFrame.
+-- TopNavHoverClient v3: hover sway for the top nav (FishingFrame, PlotFrame, ShopFrame).
+-- Only animates each frame's Rotation; never changes navigation bindings or authored layout.
 --
--- Hover is detected from mouse-movement InputObject positions (GUI space, top-bar inset already
--- removed), which is the same space PlayerGui:GetGuiObjectsAtPosition expects. Touch taps are
--- detected from the input type itself, so it also works in Studio's device emulator.
+-- Hover comes from MouseEnter/MouseLeave on each frame and its button (no screen-coordinate
+-- math). A fallback stops a sway if a MouseLeave is missed. Touch taps play one wiggle.
+local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+
+local VERSION = "v3"
 
 local Config = {
 	SwayAngle = 6, -- degrees either side of rest
@@ -26,9 +28,8 @@ local FRAME_SPECS = {
 }
 
 local warnedPaths = {}
-local bindings = {} -- array of binding tables
+local bindings = {}
 local boundTopFrames = nil
-local lastMousePosition = nil -- Vector2 in GUI space, or nil when unknown
 
 local function warnMissing(path)
 	if warnedPaths[path] then return end
@@ -48,6 +49,10 @@ local function waitForChild(parent, name, path)
 	return child
 end
 
+local function lastInputWasTouch()
+	return UserInputService:GetLastInputType() == Enum.UserInputType.Touch
+end
+
 local function cancelTween(binding)
 	if binding.tween then
 		binding.tween:Cancel()
@@ -55,16 +60,14 @@ local function cancelTween(binding)
 	end
 end
 
--- Sway is driven every frame from a sine wave, so it can start smoothly from wherever the
--- frame currently is and never needs chained tweens.
 local function startSway(binding)
 	if binding.swaying then return end
 	cancelTween(binding)
+	binding.wiggleToken = nil
 	binding.swaying = true
-	-- Start the wave at the phase that matches the current rotation (no jump).
+	-- Begin the sine wave at the phase matching the current rotation, so there is no jump.
 	local offset = math.clamp((binding.frame.Rotation - binding.restRotation) / Config.SwayAngle, -1, 1)
-	local period = Config.SwayHalfPeriod * 2
-	binding.swayClock = math.asin(offset) / (2 * math.pi) * period
+	binding.swayClock = math.asin(offset) / (2 * math.pi) * (Config.SwayHalfPeriod * 2)
 end
 
 local function stopSway(binding)
@@ -80,7 +83,21 @@ local function stopSway(binding)
 	tween:Play()
 end
 
+local function clearHover(binding)
+	table.clear(binding.inside)
+	stopSway(binding)
+end
+
+local function evaluate(binding)
+	if next(binding.inside) ~= nil then
+		startSway(binding)
+	else
+		stopSway(binding)
+	end
+end
+
 local function playTouchWiggle(binding)
+	table.clear(binding.inside)
 	binding.swaying = false
 	cancelTween(binding)
 	local step = Config.TouchWiggleSeconds / 3
@@ -109,31 +126,36 @@ local function playTouchWiggle(binding)
 	play(1)
 end
 
-local function isHovered(binding, objectsAtMouse)
-	for _, guiObject in ipairs(objectsAtMouse) do
-		if guiObject == binding.frame or guiObject:IsDescendantOf(binding.frame) then
+-- Padding (pixels) around a frame's unrotated bounds, so the rotated corners still count.
+local FALLBACK_PADDING = 16
+
+-- True if the point is on or near the frame. Uses plain bounds (AbsolutePosition and
+-- AbsoluteSize ignore Rotation) and tries the point with and without the top-bar inset, so a
+-- coordinate-space mismatch can only keep a sway running a little longer, never cancel it.
+local function frameUnderPoint(binding, x, y)
+	local inset = GuiService:GetGuiInset()
+	local position = binding.frame.AbsolutePosition
+	local size = binding.frame.AbsoluteSize
+	local minX, minY = position.X - FALLBACK_PADDING, position.Y - FALLBACK_PADDING
+	local maxX, maxY = position.X + size.X + FALLBACK_PADDING, position.Y + size.Y + FALLBACK_PADDING
+	for _, point in ipairs({ Vector2.new(x, y), Vector2.new(x - inset.X, y - inset.Y), Vector2.new(x + inset.X, y + inset.Y) }) do
+		if point.X >= minX and point.X <= maxX and point.Y >= minY and point.Y <= maxY then
 			return true
 		end
 	end
 	return false
 end
 
-local function refreshHover()
-	if #bindings == 0 then return end
-	if not lastMousePosition then
-		for _, binding in ipairs(bindings) do
-			stopSway(binding)
-		end
-		return
-	end
-	local objectsAtMouse = playerGui:GetGuiObjectsAtPosition(lastMousePosition.X, lastMousePosition.Y)
-	for _, binding in ipairs(bindings) do
-		if isHovered(binding, objectsAtMouse) then
-			startSway(binding)
-		else
-			stopSway(binding)
-		end
-	end
+local function watchHover(binding, target, key)
+	table.insert(binding.connections, target.MouseEnter:Connect(function()
+		if lastInputWasTouch() then return end -- taps also fire MouseEnter; touch never hovers
+		binding.inside[key] = true
+		evaluate(binding)
+	end))
+	table.insert(binding.connections, target.MouseLeave:Connect(function()
+		binding.inside[key] = nil
+		task.defer(evaluate, binding)
+	end))
 end
 
 local function disconnectAll()
@@ -162,13 +184,14 @@ end
 local function bindFrame(overall, spec)
 	local framePath = "PlayerGui.TopFrames.OverallTopFrame." .. spec.name
 	local frame = waitForChild(overall, spec.name, framePath)
-	if not frame or not frame:IsA("GuiObject") then return end
+	if not frame or not frame:IsA("GuiObject") then return false end
 	local button = findButton(frame, spec.button, framePath)
 
 	local binding = {
 		frame = frame,
 		restRotation = frame.Rotation,
 		connections = {},
+		inside = {},
 		swaying = false,
 		swayClock = 0,
 		tween = nil,
@@ -176,47 +199,61 @@ local function bindFrame(overall, spec)
 	}
 	table.insert(bindings, binding)
 
+	watchHover(binding, frame, "frame")
 	if button then
-		-- One wiggle per tap. Uses the input type, not device capability flags.
+		watchHover(binding, button, "button")
 		table.insert(binding.connections, button.InputBegan:Connect(function(input)
 			if input.UserInputType == Enum.UserInputType.Touch then
 				playTouchWiggle(binding)
 			end
 		end))
 	end
+	return true
 end
 
 local function bindTopFrames(topFrames)
 	topFrames = topFrames or playerGui:FindFirstChild("TopFrames")
 	if topFrames == boundTopFrames then return end
 	disconnectAll()
-	if not topFrames then return end -- ChildAdded below binds it when it arrives
+	if not topFrames then return end -- ChildAdded binds it when it arrives
 	boundTopFrames = topFrames
 
 	local overall = waitForChild(topFrames, "OverallTopFrame", "PlayerGui.TopFrames.OverallTopFrame")
 	if not overall or boundTopFrames ~= topFrames then return end
+	local count = 0
 	for _, spec in ipairs(FRAME_SPECS) do
-		bindFrame(overall, spec)
+		if bindFrame(overall, spec) then
+			count += 1
+		end
 	end
-	refreshHover()
+	-- One line so it is easy to confirm in Output which version is running.
+	print(string.format("[FishingSystemV2.TopNavHover] %s bound %d/3 top nav frames", VERSION, count))
 end
 
--- Track the mouse in GUI space. InputObject.Position for mouse movement already excludes the
--- top-bar inset, matching GetGuiObjectsAtPosition.
+-- Fallback: if a MouseLeave was missed, stop the sway once the mouse is clearly elsewhere.
 UserInputService.InputChanged:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseMovement then
-		lastMousePosition = Vector2.new(input.Position.X, input.Position.Y)
-		refreshHover()
-	elseif input.UserInputType == Enum.UserInputType.Touch then
-		-- Touch never hovers.
-		lastMousePosition = nil
-		refreshHover()
+	if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+	for _, binding in ipairs(bindings) do
+		if binding.swaying and not frameUnderPoint(binding, input.Position.X, input.Position.Y) then
+			clearHover(binding)
+		end
+	end
+end)
+
+UserInputService.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch then
+		for _, binding in ipairs(bindings) do
+			if binding.swaying then
+				clearHover(binding)
+			end
+		end
 	end
 end)
 
 UserInputService.WindowFocusReleased:Connect(function()
-	lastMousePosition = nil
-	refreshHover()
+	for _, binding in ipairs(bindings) do
+		clearHover(binding)
+	end
 end)
 
 -- Advance every swaying frame once per rendered frame.
@@ -225,8 +262,8 @@ RunService.RenderStepped:Connect(function(deltaTime)
 	for _, binding in ipairs(bindings) do
 		if binding.swaying then
 			binding.swayClock += deltaTime
-			local phase = (binding.swayClock / period) * 2 * math.pi
-			binding.frame.Rotation = binding.restRotation + Config.SwayAngle * math.sin(phase)
+			binding.frame.Rotation = binding.restRotation
+				+ Config.SwayAngle * math.sin((binding.swayClock / period) * 2 * math.pi)
 		end
 	end
 end)
